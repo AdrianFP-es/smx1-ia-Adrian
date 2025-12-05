@@ -68,10 +68,85 @@
     x: 100, y: 100, w: 28, h: 28, speed: 4, color: '#5fb8ff'
   };
 
+  // --- Partículas (confeti) ---
+  const particles = [];
+  const CONFETTI_COLORS = ['#ff3b3b','#ffd24d','#4ae17a','#6fc3ff','#d78bff','#ff8fa3'];
+  function spawnConfetti(wx, wy, n = 40){
+    for(let i=0;i<n;i++){
+      const angle = Math.PI*2 * Math.random();
+      const speed = Math.random()*6 + 2;
+      particles.push({
+        x: wx + rand(-8,8),
+        y: wy + rand(-8,8),
+        vx: Math.cos(angle)*speed,
+        vy: Math.sin(angle)*speed - Math.random()*4,
+        life: Math.random()*900 + 600,
+        age: 0,
+        size: Math.random()*3 + 2,
+        color: CONFETTI_COLORS[Math.floor(Math.random()*CONFETTI_COLORS.length)]
+      });
+      if(particles.length > 500) particles.shift();
+    }
+  }
+
+  function updateParticles(dt){
+    for(let i = particles.length-1; i>=0; i--){
+      const p = particles[i];
+      p.vy += 0.12 * dt; // gravedad ligera
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      p.age += dt * 16.666;
+      if(p.age > p.life) particles.splice(i,1);
+    }
+  }
+
+  function drawParticles(){
+    ctx.save();
+    for(const p of particles){
+      ctx.fillStyle = p.color;
+      ctx.fillRect(p.x - 1, p.y - 1, p.size, p.size);
+    }
+    ctx.restore();
+  }
+
+  // --- Sonidos simples con WebAudio (no requiere ficheros externos) ---
+  let audioCtx = null;
+  function ensureAudio(){
+    if(audioCtx) return audioCtx;
+    try{ audioCtx = new (window.AudioContext || window.webkitAudioContext)(); }
+    catch(e){ audioCtx = null; }
+    return audioCtx;
+  }
+
+  function playBeep(freq=440, duration=0.12, type='sine', gain=0.12){
+    const ac = ensureAudio();
+    if(!ac) return;
+    const o = ac.createOscillator();
+    const g = ac.createGain();
+    o.type = type; o.frequency.value = freq;
+    g.gain.value = gain;
+    o.connect(g); g.connect(ac.destination);
+    o.start();
+    const now = ac.currentTime;
+    g.gain.setValueAtTime(gain, now);
+    g.gain.exponentialRampToValueAtTime(0.001, now + duration);
+    o.stop(now + duration + 0.02);
+  }
+
+  function playPickup(){
+    playBeep(880, 0.14, 'sine', 0.15);
+    setTimeout(()=> playBeep(1100, 0.10, 'sine', 0.08), 60);
+  }
+  function playHit(){
+    playBeep(180, 0.08, 'square', 0.12);
+  }
+
   let treasure = { x:0, y:0, w:28, h:28, color:'#ffd24d' };
   let obstacles = [];
   let camX = 0, camY = 0;
   let visibility = 220;
+  let collided = false;
+  let _lastFrameTime = 0;
   const keys = {};
 
   function rand(min,max){ return Math.random()*(max-min)+min; }
@@ -136,7 +211,7 @@
     camY = Math.max(0, Math.min(worldH - CANVAS_H, player.y - CANVAS_H/2 + player.h/2));
   }
 
-  function update(){
+  function update(dt = 1){
     if(gameOver) return;
     let moved = false;
     const old = { x: player.x, y: player.y };
@@ -150,28 +225,28 @@
 
     // Mover en X y resolver colisiones en X (evita problemas en esquinas)
     if(dx !== 0){
-      player.x += dx;
+      player.x += dx * dt;
       player.x = Math.max(0, Math.min(worldW - player.w, player.x));
       for(const ob of obstacles){
         // solo interesa si hay solapamiento vertical
         if(player.y + player.h <= ob.y || player.y >= ob.y + ob.h) continue;
         if(aabbColl(player, ob)){
-          if(dx > 0) player.x = ob.x - player.w;
-          else if(dx < 0) player.x = ob.x + ob.w;
+          if(dx > 0) { player.x = ob.x - player.w; collided = true; }
+          else if(dx < 0) { player.x = ob.x + ob.w; collided = true; }
         }
       }
     }
 
     // Mover en Y y resolver colisiones en Y
     if(dy !== 0){
-      player.y += dy;
+      player.y += dy * dt;
       player.y = Math.max(0, Math.min(worldH - player.h, player.y));
       for(const ob of obstacles){
         // solo interesa si hay solapamiento horizontal
         if(player.x + player.w <= ob.x || player.x >= ob.x + ob.w) continue;
         if(aabbColl(player, ob)){
-          if(dy > 0) player.y = ob.y - player.h;
-          else if(dy < 0) player.y = ob.y + ob.h;
+          if(dy > 0) { player.y = ob.y - player.h; collided = true; }
+          else if(dy < 0) { player.y = ob.y + ob.h; collided = true; }
         }
       }
     }
@@ -180,7 +255,6 @@
       moves++;
       movesEl.textContent = moves;
     }
-
     timeEl.textContent = Math.floor((Date.now() - startTime)/1000);
     updateCamera();
 
@@ -191,6 +265,9 @@
     if(dist < (Math.max(player.w, player.h)/2 + Math.max(treasure.w, treasure.h)/2) ){
       treasuresFound++;
       foundEl.textContent = treasuresFound;
+      // feedback: sonido y confeti
+      playPickup();
+      spawnConfetti(treasureCenter.x, treasureCenter.y, 60);
       if(level >= MAX_LEVEL){
         endGame(true);
       } else {
@@ -199,6 +276,11 @@
         spawnMapForLevel(level);
       }
     }
+
+    // reproducir sonido de choque si hubo colisión al moverse
+    if(typeof collided !== 'undefined' && collided){ playHit(); }
+    collided = false;
+    updateParticles(dt);
   }
 
   function drawFog(){
@@ -325,6 +407,9 @@
     ctx.font = '16px sans-serif';
     ctx.fillText('👤', player.x + player.w/2, player.y + player.h/2);
 
+    // dibujar partículas dentro del mundo (antes de restaurar la transform)
+    drawParticles();
+
     ctx.restore();
     drawFog();
 
@@ -332,8 +417,13 @@
     drawMinimap();
   }
 
-  function loop(){
-    update();
+  function loop(now){
+    if(!now) now = performance.now();
+    if(!_lastFrameTime) _lastFrameTime = now;
+    const rawDt = now - _lastFrameTime;
+    _lastFrameTime = now;
+    const dt = Math.min(40, rawDt) / 16.666; // normalize relative to 60fps
+    update(dt);
     draw();
     if(!gameOver) requestAnimationFrame(loop);
   }
