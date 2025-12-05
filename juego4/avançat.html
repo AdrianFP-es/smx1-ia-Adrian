@@ -1,0 +1,260 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <title>Carrera: Evita obstáculos</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    :root{--bg:#071216;--road:#222;--panel:#0f1720;--accent:#3bd671}
+    html,body{height:100%;margin:0;font-family:Inter,Arial,Helvetica,sans-serif;background:var(--bg);color:#eef;display:flex;align-items:center;justify-content:center}
+    .wrap{width:920px;max-width:98%;display:flex;flex-direction:column;align-items:center;gap:10px;position:relative}
+    canvas{background:linear-gradient(#071b24,#041018);border-radius:8px;border:3px solid #0b1518;display:block}
+    .hud{display:flex;gap:14px;font-size:15px}
+    .pill{background:var(--panel);padding:8px 12px;border-radius:8px;border:1px solid rgba(255,255,255,0.03)}
+    .overlay{position:absolute;inset:0;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,0.7)}
+    .box{background:#081016;padding:20px;border-radius:8px;border:2px solid var(--accent);color:#eaffea;text-align:center}
+    button{margin-top:12px;padding:8px 14px;border-radius:8px;border:none;background:var(--accent);color:#00210b;cursor:pointer;font-weight:700}
+    .small{font-size:13px;color:#9aa}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h2>Carrera - Evita obstácuclos</h2>
+    <div class="hud" aria-hidden>
+      <div class="pill">Tiempo: <b id="time">0.0</b>s</div>
+      <div class="pill">Distancia: <b id="distance">0</b>m</div>
+      <div class="pill">Velocidad: <b id="speed">1.00</b>x</div>
+    </div>
+
+    <canvas id="game" width="800" height="600" aria-label="Zona de juego"></canvas>
+
+    <div class="overlay" id="overlay" role="dialog" aria-modal="true">
+      <div class="box">
+        <h3 id="title">Choque</h3>
+        <p id="stats">Tiempo: 0s · Distancia: 0m</p>
+        <button id="restart">Reiniciar (Espacio)</button>
+      </div>
+    </div>
+
+    <div class="small">Controles: ← → (A D). ↑ ↓ (W S) para acelerar/frenar. Evita vehículos y obstáculos. La velocidad sube con el tiempo.</div>
+  </div>
+
+<script>
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const overlay = document.getElementById('overlay');
+const titleEl = document.getElementById('title');
+const statsEl = document.getElementById('stats');
+const restartBtn = document.getElementById('restart');
+const timeEl = document.getElementById('time');
+const distEl = document.getElementById('distance');
+const speedEl = document.getElementById('speed');
+
+const W = canvas.width, H = canvas.height;
+const road = { x: 140, w: W - 280 };
+
+const player = {
+  w: 48, h: 80,
+  x: W/2 - 24,
+  y: H - 130,
+  baseSpeed: 5, speed: 5,
+  color: '#ff6b6b'
+};
+
+let obstacles = [];
+let keys = {};
+let lastTime = performance.now();
+let spawnTimer = 0;
+let spawnInterval = 1200;
+let gameOver = false;
+let elapsed = 0;
+let distance = 0;
+let speedMultiplier = 1;
+let accelControl = 1; // multiplicador por controles adelante/atrás (W/S o Up/Down)
+const distancePerSecond = 5;
+
+function rand(min,max){ return Math.random()*(max-min)+min; }
+function rndInt(a,b){ return Math.floor(rand(a,b+1)); }
+
+function reset(){
+  obstacles = [];
+  keys = {};
+  lastTime = performance.now();
+  spawnTimer = 0;
+  spawnInterval = 1200;
+  elapsed = 0;
+  distance = 0;
+  speedMultiplier = 1;
+  player.x = W/2 - player.w/2;
+  player.speed = player.baseSpeed;
+  accelControl = 1;
+  gameOver = false;
+  overlay.style.display = 'none';
+  updateHUD();
+  requestAnimationFrame(loop);
+}
+
+function spawnObstacle(){
+  const laneCount = 3;
+  const laneW = road.w / laneCount;
+  const lane = rndInt(0, laneCount-1);
+  const w = rndInt(Math.floor(laneW*0.55), Math.floor(laneW*0.95));
+  const h = rndInt(36, 90);
+  const x = road.x + lane * laneW + (laneW - w)/2 + rand(-8,8);
+  const y = -h - 20;
+  const baseVy = rand(1.6, 2.6);
+  const vy = baseVy * (1 + elapsed * 0.015) * speedMultiplier;
+  const colors = ['#d64545','#f39c12','#8e44ad','#3498db','#e67e22','#95a5a6'];
+  obstacles.push({x,y,w,h,vy,color: colors[rndInt(0,colors.length-1)]});
+}
+
+function aabb(a,b){
+  return !(a.x + a.w <= b.x || a.x >= b.x + b.w || a.y + a.h <= b.y || a.y >= b.y + b.h);
+}
+
+function update(dt){
+  if(gameOver) return;
+
+  elapsed += dt/1000;
+  // aplicar control de avance/retroceso
+  if(keys['ArrowUp'] || keys['w']) accelControl = Math.min(2.0, accelControl + (dt/1000) * 0.9);
+  else if(keys['ArrowDown'] || keys['s']) accelControl = Math.max(0.4, accelControl - (dt/1000) * 1.2);
+  else {
+    // decay hacia 1.0 cuando no se presiona
+    const diff = 1 - accelControl;
+    accelControl += diff * Math.min(1, (dt/1000) * 3.0);
+  }
+
+  const effectiveSpeed = speedMultiplier * accelControl;
+  distance += distancePerSecond * (dt/1000) * effectiveSpeed;
+
+  // velocidad global sube lentamente con el tiempo
+  speedMultiplier = 1 + Math.min(3.0, elapsed * 0.01); // +1 después ~100s
+  // aumento suave de la velocidad lateral del jugador
+  player.speed = player.baseSpeed + Math.floor((effectiveSpeed - 1) * 1.8);
+
+  // movimiento lateral
+  if(keys['ArrowLeft'] || keys['a']) player.x -= player.speed;
+  if(keys['ArrowRight'] || keys['d']) player.x += player.speed;
+  player.x = Math.max(road.x + 6, Math.min(road.x + road.w - player.w - 6, player.x));
+
+  // generar obstáculos; intervalo disminuye lentamente
+  spawnTimer += dt;
+  if(spawnTimer > spawnInterval){
+    spawnObstacle();
+    spawnTimer = 0;
+    spawnInterval = Math.max(420, 1200 - elapsed * 5); // baja despacio
+  }
+
+  // actualizar obstáculos
+  for(let i = obstacles.length - 1; i >= 0; i--){
+    const ob = obstacles[i];
+    // los obstáculos se ven afectados por el control de aceleración (adelante/atrás)
+    ob.y += ob.vy * (dt / 16.67) * accelControl;
+    if(ob.y > H + 80) obstacles.splice(i,1);
+    else {
+      if(aabb({x:player.x,y:player.y,w:player.w,h:player.h}, {x:ob.x,y:ob.y,w:ob.w,h:ob.h})){
+        gameOver = true;
+        showGameOver();
+        return;
+      }
+    }
+  }
+
+  updateHUD(effectiveSpeed);
+}
+
+function drawRoad(){
+  ctx.fillStyle = '#222';
+  ctx.fillRect(road.x, 0, road.w, H);
+  ctx.fillStyle = '#111';
+  ctx.fillRect(road.x-10, 0, 10, H);
+  ctx.fillRect(road.x+road.w, 0, 10, H);
+  ctx.strokeStyle = 'rgba(255,255,255,0.12)';
+  ctx.lineWidth = 4;
+  const laneCount = 3;
+  const laneW = road.w / laneCount;
+  for(let i=1;i<laneCount;i++){
+    const mx = road.x + i*laneW;
+    ctx.setLineDash([26,20]);
+    ctx.beginPath();
+    ctx.moveTo(mx, 0);
+    ctx.lineTo(mx, H);
+    ctx.stroke();
+  }
+  ctx.setLineDash([]);
+}
+
+function draw(){
+  ctx.clearRect(0,0,W,H);
+  const g = ctx.createLinearGradient(0,0,0,H);
+  g.addColorStop(0,'#0b3140');
+  g.addColorStop(1,'#04121a');
+  ctx.fillStyle = g;
+  ctx.fillRect(0,0,W,H);
+
+  drawRoad();
+
+  for(const ob of obstacles){
+    ctx.fillStyle = ob.color;
+    ctx.fillRect(ob.x, ob.y, ob.w, ob.h);
+    ctx.strokeStyle = '#0b0b0b';
+    ctx.strokeRect(ob.x, ob.y, ob.w, ob.h);
+    ctx.fillStyle = 'rgba(255,255,255,0.06)';
+    ctx.fillRect(ob.x + ob.w*0.15, ob.y + ob.h*0.22, ob.w*0.7, ob.h*0.12);
+  }
+
+  // player
+  ctx.fillStyle = player.color;
+  ctx.fillRect(player.x, player.y, player.w, player.h);
+  ctx.fillStyle = '#0b0b0b';
+  ctx.fillRect(player.x + 6, player.y + player.h - 8, 10, 6);
+  ctx.fillRect(player.x + player.w - 16, player.y + player.h - 8, 10, 6);
+  ctx.fillStyle = 'rgba(255,255,255,0.85)';
+  ctx.fillRect(player.x + player.w/2 - 8, player.y + 10, 16, 12);
+
+  // HUD
+  ctx.fillStyle = 'rgba(0,0,0,0.35)';
+  ctx.fillRect(12,12,240,56);
+  ctx.fillStyle = '#fff';
+  ctx.font = '16px sans-serif';
+  ctx.textAlign = 'left';
+  ctx.fillText(`Tiempo: ${elapsed.toFixed(1)}s`, 22, 34);
+  ctx.fillText(`Dist: ${Math.floor(distance)}m`, 22, 54);
+}
+
+function showGameOver(){
+  overlay.style.display = 'flex';
+  titleEl.textContent = '¡Impacto!';
+  statsEl.textContent = `Tiempo: ${elapsed.toFixed(1)}s · Distancia: ${Math.floor(distance)}m`;
+}
+
+function updateHUD(){
+  timeEl.textContent = elapsed.toFixed(1);
+  distEl.textContent = Math.floor(distance);
+  // si no se le pasó effectiveSpeed, mostrar speedMultiplier por seguridad
+  speedEl.textContent = (typeof arguments[0] === 'number' ? arguments[0] : speedMultiplier).toFixed(2);
+}
+
+function loop(now){
+  const dt = now - lastTime;
+  lastTime = now;
+  update(dt);
+  draw();
+  if(!gameOver) requestAnimationFrame(loop);
+}
+
+window.addEventListener('keydown', e=>{
+  keys[e.key] = true;
+  if(e.code === 'Space' && gameOver) reset();
+});
+window.addEventListener('keyup', e=>{
+  keys[e.key] = false;
+});
+
+restartBtn.addEventListener('click', reset);
+
+reset();
+</script>
+</body>
+</html>

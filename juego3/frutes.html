@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="ca">
+<head>
+  <meta charset="utf-8" />
+  <title>Atrapa fruites</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    :root{--bg:#09121a;--panel:#121820;--accent:#ffd24d;--text:#e6eef5}
+    html,body{height:100%;margin:0;font-family:Inter,Arial,Helvetica,sans-serif;background:var(--bg);color:var(--text);display:flex;align-items:center;justify-content:center}
+    .wrap{width:920px;max-width:98%;display:flex;flex-direction:column;align-items:center;gap:12px}
+    canvas{background:linear-gradient(#08202a,#06121a);border-radius:8px;border:3px solid #0f171b;display:block}
+    .hud{display:flex;gap:14px;font-size:15px;align-items:center}
+    .hud .pill{background:var(--panel);padding:8px 12px;border-radius:8px;border:1px solid rgba(255,255,255,0.03)}
+    .msg{color:#9fb0bd;font-size:13px}
+    .overlay{position:absolute;inset:0;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,0.6)}
+    .box{background:#0f1720;padding:20px;border-radius:8px;border:2px solid var(--accent);min-width:260px;text-align:center}
+    button{margin-top:12px;padding:8px 14px;border-radius:8px;border:none;background:var(--accent);color:#000;cursor:pointer;font-weight:700}
+  </style>
+</head>
+<body>
+  <div class="wrap" style="position:relative">
+    <h2>Atrapa les fruites</h2>
+
+    <div class="hud" aria-hidden>
+      <div class="pill">Punts: <b id="score">0</b></div>
+      <div class="pill">Perdudes: <b id="missed">0</b>/10</div>
+      <div class="pill">Nivell: <b id="level">1</b></div>
+      <div style="margin-left:8px;color:#8699a6;font-size:13px">Mou: ← → (A D). Reinicia: Espai</div>
+    </div>
+
+    <canvas id="game" width="800" height="600" aria-label="Zona de joc"></canvas>
+
+    <div class="msg">Les fruites cauen des de dalt. Atrapa-les amb la cistella. El joc acaba si perds 10 fruites.</div>
+
+    <div id="overlay" class="overlay" role="dialog" aria-modal="true">
+      <div class="box">
+        <h3 id="title">Game Over</h3>
+        <p id="summary">Punts: 0 · Perdudes: 10</p>
+        <button id="restartBtn">Reiniciar (Espai)</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+  // Elements
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const scoreEl = document.getElementById('score');
+  const missedEl = document.getElementById('missed');
+  const levelEl = document.getElementById('level');
+  const overlay = document.getElementById('overlay');
+  const titleEl = document.getElementById('title');
+  const summaryEl = document.getElementById('summary');
+  const restartBtn = document.getElementById('restartBtn');
+
+  const W = canvas.width, H = canvas.height;
+
+  // Player basket
+  const basket = {
+    w: 120, h: 28,
+    x: (W - 120)/2,
+    y: H - 56,
+    speed: 6,
+    color: '#ffd24d'
+  };
+
+  // Game state
+  let fruits = []; // {x,y,r,vy,color,emoji,value,rare}
+  let score = 0;
+  let missed = 0;
+  let level = 1;
+  let gameOver = false;
+  let lastTime = performance.now();
+  let lastSpawn = performance.now();
+  let spawnInterval = 1000; // ms (más tiempo entre apariciones al inicio)
+  let fallSpeedMultiplier = 1; // aumentará más despacio con la puntuación
+
+  // Input
+  const keys = {};
+
+  // Fruit types (emoji, color, value, rarity)
+  const FRUITS = [
+    {emoji:'🍎', color:'#e74c3c', value:1},
+    {emoji:'🍊', color:'#f39c12', value:1},
+    {emoji:'🍌', color:'#f1c40f', value:1},
+    {emoji:'🍐', color:'#2ecc71', value:1},
+    {emoji:'🍇', color:'#9b59b6', value:1},
+    {emoji:'🍓', color:'#ff4d4d', value:2},
+    {emoji:'🍍', color:'#2ec4b6', value:2},
+    {emoji:'🍉', color:'#7bed9f', value:2},
+    {emoji:'🌟', color:'#ffd700', value:5, rare:true}
+  ];
+
+  function rand(min,max){ return Math.random()*(max-min)+min; }
+  function rndInt(a,b){ return Math.floor(rand(a,b+1)); }
+
+  // Spawn a fruit with properties depending on score/level
+  function spawnFruit(){
+    const fdef = FRUITS[rndInt(0, FRUITS.length-1)];
+    const baseR = fdef.rare ? rndInt(10,14) : rndInt(14,26);
+    const r = Math.max(8, baseR - Math.floor(level/2));
+    const x = rand(r, W - r);
+    // velocidad base más lenta; aumenta amb nivell/puntuació però més a poc a poc
+    const baseVy = rand(1.0, 1.6) + level*0.12 + score*0.008;
+    const vy = (baseVy + (fdef.rare ? 0.6 : 0)) * fallSpeedMultiplier;
+    fruits.push({
+      x, y: -r - 6, r, vy,
+      color: fdef.color, emoji: fdef.emoji,
+      value: fdef.value || 1, rare: !!fdef.rare
+    });
+  }
+
+  function resetGame(){
+    fruits = [];
+    score = 0; missed = 0; level = 1;
+    spawnInterval = 1000;
+    fallSpeedMultiplier = 1;
+    basket.w = 120;
+    basket.speed = 6; // restablecer velocidad inicial
+    basket.x = (W - basket.w)/2;
+    gameOver = false;
+    lastSpawn = performance.now();
+    lastTime = performance.now();
+    overlay.style.display = 'none';
+    updateHUD();
+    requestAnimationFrame(loop);
+  }
+
+  function endGame(){
+    gameOver = true;
+    titleEl.textContent = 'Game Over';
+    summaryEl.textContent = `Punts: ${score} · Perdudes: ${missed}`;
+    overlay.style.display = 'flex';
+  }
+
+  function updateHUD(){
+    scoreEl.textContent = score;
+    missedEl.textContent = missed;
+    levelEl.textContent = level;
+  }
+
+  function update(dt){
+    if(gameOver) return;
+
+    // basket movement
+    if(keys['ArrowLeft'] || keys['a'] || keys['A']) basket.x -= basket.speed;
+    if(keys['ArrowRight'] || keys['d'] || keys['D']) basket.x += basket.speed;
+    basket.x = Math.max(6, Math.min(W - basket.w - 6, basket.x));
+
+    // spawn control (spawnInterval shortens as score increases)
+    const now = performance.now();
+    if(now - lastSpawn > spawnInterval){
+      spawnFruit();
+      lastSpawn = now;
+      // reduir la velocitat d'aparició més a poc a poc per donar marge
+      spawnInterval = Math.max(350, 1000 - Math.floor(score * 6));
+    }
+
+    // update fruits positions and collisions
+    for(let i = fruits.length - 1; i >= 0; i--){
+      const f = fruits[i];
+      f.y += f.vy * (dt / 16.67); // normalize by frame time
+
+      // collision with basket (circle vs rect nearest point)
+      const nearestX = Math.max(basket.x, Math.min(f.x, basket.x + basket.w));
+      const nearestY = Math.max(basket.y, Math.min(f.y, basket.y + basket.h));
+      const dx = f.x - nearestX;
+      const dy = f.y - nearestY;
+      if(dx*dx + dy*dy <= f.r*f.r){
+        // caught
+        fruits.splice(i,1);
+        // update score depending on fruit value
+        score += f.value;
+        // level progression: every 10 points increase level
+        const newLevel = 1 + Math.floor(score / 10);
+        if(newLevel > level){
+          level = newLevel;
+        }
+        // subida de velocidad més lenta per donar temps a atrapar fruites
+        fallSpeedMultiplier = Math.min(2.0, 1 + score * 0.01);
+        // basket grows slightly occasionally
+        if(score % 8 === 0) basket.w = Math.min(200, basket.w + 8);
+        // augmenta gradualment la velocitat del jugador segons la puntuació (lenta i amb límit)
+        basket.speed = Math.min(12, 6 + Math.floor(score / 6));
+        updateHUD();
+        continue;
+      }
+
+      // missed fruit
+      if(f.y - f.r > H){
+        fruits.splice(i,1);
+        missed++;
+        updateHUD();
+        if(missed >= 10){
+          endGame();
+          return;
+        }
+      }
+    }
+  }
+
+  function draw(){
+    // clear
+    ctx.clearRect(0,0,W,H);
+
+    // background
+    const g = ctx.createLinearGradient(0,0,0,H);
+    g.addColorStop(0,'#08323f');
+    g.addColorStop(1,'#04121a');
+    ctx.fillStyle = g;
+    ctx.fillRect(0,0,W,H);
+
+    // draw fruits
+    for(const f of fruits){
+      // rare fruit halo
+      if(f.rare){
+        const halo = ctx.createRadialGradient(f.x, f.y, 0, f.x, f.y, f.r*2.2);
+        halo.addColorStop(0, 'rgba(255,230,120,0.25)');
+        halo.addColorStop(1, 'rgba(255,230,120,0)');
+        ctx.fillStyle = halo;
+        ctx.beginPath();
+        ctx.arc(f.x, f.y, f.r*2.2, 0, Math.PI*2);
+        ctx.fill();
+      }
+      // fruit body
+      ctx.fillStyle = f.color;
+      ctx.beginPath();
+      ctx.arc(f.x, f.y, f.r, 0, Math.PI*2);
+      ctx.fill();
+      // emoji
+      ctx.font = `${Math.max(10, f.r)}px serif`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = '#000';
+      ctx.fillText(f.emoji, f.x, f.y + 1);
+      // outline
+      ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+      ctx.stroke();
+    }
+
+    // basket
+    ctx.fillStyle = basket.color;
+    ctx.fillRect(basket.x, basket.y, basket.w, basket.h);
+    ctx.strokeStyle = '#000';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(basket.x, basket.y, basket.w, basket.h);
+    ctx.font = '20px sans-serif';
+    ctx.fillStyle = '#101010';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('🧺', basket.x + basket.w/2, basket.y + basket.h/2 - 6);
+
+    // HUD drawn on canvas (redundant with DOM, helpful visually)
+    ctx.fillStyle = 'rgba(0,0,0,0.35)';
+    ctx.fillRect(12,12,150,48);
+    ctx.fillStyle = '#fff';
+    ctx.font = '18px sans-serif';
+    ctx.textAlign = 'left';
+    ctx.fillText(`Punts: ${score}`, 22, 34);
+    ctx.font = '12px sans-serif';
+    ctx.fillText(`Perdudes: ${missed}/10`, 22, 50 - 6);
+    ctx.fillStyle = 'rgba(255,255,255,0.08)';
+    ctx.fillRect(12,70,150,6);
+    ctx.fillStyle = '#ffd24d';
+    ctx.fillRect(12,70, Math.min(150, (score % 10)/10 * 150), 6);
+  }
+
+  function loop(now){
+    const dt = now - lastTime;
+    lastTime = now;
+    update(dt);
+    draw();
+    if(!gameOver) requestAnimationFrame(loop);
+  }
+
+  // input
+  window.addEventListener('keydown', e=>{
+    keys[e.key] = true;
+    if(e.code === 'Space' && gameOver) resetGame();
+  });
+  window.addEventListener('keyup', e=>{
+    keys[e.key] = false;
+  });
+
+  restartBtn.addEventListener('click', resetGame);
+
+  // start
+  resetGame();
+  </script>
+</body>
+</html>
